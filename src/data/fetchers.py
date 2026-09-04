@@ -4,6 +4,7 @@ import xarray as xr
 import cdsapi
 import os
 import numpy as np
+import tempfile
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -41,6 +42,29 @@ class OpenMeteoFetcher:
         df['lead_hours'] = (df['time'] - df['issue_time']).dt.total_seconds() / 3600.0
         return df
 
+    def fetch_actual(self, lat, lon, start_date, end_date):
+        """Загружает фактические почасовые данные (референс) из Open-Meteo"""
+        url = "https://archive-api.open-meteo.com/v1/archive"
+        params = {
+            "latitude": lat,
+            "longitude": lon,
+            "start_date": start_date,
+            "end_date": end_date,
+            "hourly": "wind_speed_10m,wind_direction_10m",
+            "timezone": "GMT"
+        }
+        response = requests.get(url, params=params)
+        if response.status_code != 200:
+            raise Exception(f"Open-Meteo actual API error: {response.status_code}")
+        data = response.json()
+        hourly = data['hourly']
+        df = pd.DataFrame({
+            'time': pd.to_datetime(hourly['time']),
+            'wind_speed_ref': hourly['wind_speed_10m'],
+            'wind_dir_ref': hourly['wind_direction_10m']
+        })
+        return df
+
 
 class Era5Fetcher:
     """Загрузка реанализа ERA5 через CDS API (требуется .cdsapirc)"""
@@ -67,13 +91,27 @@ class Era5Fetcher:
             "grid": [grid, grid],
             "dataset": "reanalysis-era5-single-levels"
         }
-        filename = f"era5_{start_date}_{end_date}_{lat}N_{lon}E.nc"
-        self.client.retrieve("reanalysis-era5-single-levels", request, filename)
-        ds = xr.open_dataset(filename)
-        point = ds.sel(latitude=lat, longitude=lon, method='nearest')
-        speed = np.sqrt(point['u10']**2 + point['v10']**2)
-        df = speed.to_dataframe(name='wind_speed_ref').reset_index()
-        df['time'] = pd.to_datetime(df['time'])
-        df = df[['time', 'wind_speed_ref']]
-        os.remove(filename)
+        # Создаём временный файл
+        with tempfile.NamedTemporaryFile(suffix='.nc', delete=False) as tmp:
+            temp_filename = tmp.name
+        # Скачиваем
+        self.client.retrieve("reanalysis-era5-single-levels", request, temp_filename)
+        if not os.path.exists(temp_filename):
+            raise Exception(f"File {temp_filename} was not created")
+        # Читаем
+        ds = xr.open_dataset(temp_filename)
+        try:
+            point = ds.sel(latitude=lat, longitude=lon, method='nearest')
+            speed = np.sqrt(point['u10']**2 + point['v10']**2)
+            speed = speed.squeeze()
+            times_arr = point['valid_time'].values
+            values = speed.values
+            df = pd.DataFrame({
+                'time': pd.to_datetime(times_arr),
+                'wind_speed_ref': values
+            })
+        finally:
+            ds.close()
+        # Удаляем временный файл
+        os.remove(temp_filename)
         return df

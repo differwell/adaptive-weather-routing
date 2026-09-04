@@ -10,7 +10,7 @@ import pandas as pd
 def run_stage1():
     LAT, LON = 55.0, 15.0
     START = "2022-01-01"
-    END = "2022-01-31"
+    END = "2022-12-31"
     
     print("=== Stage 1: Data Feasibility ===")
     
